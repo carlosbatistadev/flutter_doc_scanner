@@ -79,61 +79,62 @@ class FlutterDocScannerPlugin : FlutterPlugin, ActivityAware, MethodChannel.Meth
         }
     }
 
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?): Boolean {
-        val resultChannel = pendingResults[requestCode]
-        if (resultChannel == null) {
-            Log.e(TAG, "Erro: Nenhum resultChannel encontrado para requestCode: $requestCode")
-            return false
-        }
-
-        when (requestCode) {
-            REQUEST_CODE_SCAN, REQUEST_CODE_SCAN_PDF -> {
-                if (resultCode == Activity.RESULT_OK) {
-                    val scanningResult = GmsDocumentScanningResult.fromActivityResultIntent(data)
-                    scanningResult?.getPdf()?.let { pdf ->
-                        val pdfUri = pdf.getUri()
-                        val pageCount = pdf.getPageCount()
-                        if (pdfUri != null) {
-                            resultChannel.success(
-                                mapOf(
-                                    "pdfUri" to pdfUri.toString(),
-                                    "pageCount" to pageCount
-                                )
-                            )
-                        } else {
-                            resultChannel.error("SCAN_FAILED", "PDF URI não retornado pelo scanner", null)
-                        }
-                    } ?: resultChannel.error("SCAN_FAILED", "Nenhum resultado de PDF retornado", null)
-                } else {
-                    resultChannel.success(null)
-                }
-            }
-
-            REQUEST_CODE_SCAN_IMAGES, REQUEST_CODE_SCAN_URI -> {
-                if (resultCode == Activity.RESULT_OK) {
-                    val scanningResult = GmsDocumentScanningResult.fromActivityResultIntent(data)
-                    scanningResult?.getPages()?.let { pages ->
-                        val imageUris = pages.mapNotNull { it.getUri()?.toString() }
-                        if (imageUris.isNotEmpty()) {
-                            resultChannel.success(
-                                mapOf(
-                                    "Uris" to imageUris,
-                                    "Count" to imageUris.size
-                                )
-                            )
-                        } else {
-                            resultChannel.error("SCAN_FAILED", "Nenhum caminho de imagem foi retornado", null)
-                        }
-                    } ?: resultChannel.error("SCAN_FAILED", "Nenhum resultado de imagem retornado", null)
-                } else {
-                    resultChannel.success(null)
-                }
-            }
-        }
-
-        pendingResults.remove(requestCode) // Remove o resultado pendente após ser usado
-        return true
+   override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?): Boolean {
+    val resultChannel = pendingResults[requestCode]
+    if (resultChannel == null) {
+        Log.e(TAG, "Erro: Nenhum resultChannel encontrado para requestCode: $requestCode")
+        return false
     }
+
+    when (requestCode) {
+        REQUEST_CODE_SCAN, REQUEST_CODE_SCAN_PDF -> {
+            if (resultCode == Activity.RESULT_OK) {
+                val scanningResult = GmsDocumentScanningResult.fromActivityResultIntent(data)
+                scanningResult?.pdf?.let { pdf ->
+                    val pdfUri = pdf.uri // ✅ Correção: Usar pdf.uri
+                    val pageCount = pdf.pageCount
+                    if (pdfUri != null) {
+                        resultChannel.success(
+                            mapOf(
+                                "pdfUri" to pdfUri.toString(),
+                                "pageCount" to pageCount
+                            )
+                        )
+                    } else {
+                        resultChannel.error("SCAN_FAILED", "PDF URI não retornado pelo scanner", null)
+                    }
+                } ?: resultChannel.error("SCAN_FAILED", "Nenhum resultado de PDF retornado", null)
+            } else {
+                resultChannel.success(null)
+            }
+        }
+
+        REQUEST_CODE_SCAN_IMAGES, REQUEST_CODE_SCAN_URI -> {
+            if (resultCode == Activity.RESULT_OK) {
+                val scanningResult = GmsDocumentScanningResult.fromActivityResultIntent(data)
+                scanningResult?.pages?.let { pages ->
+                    val imageUris = pages.mapNotNull { it.imageUri?.toString() } // ✅ Correção: Usar imageUri
+                    if (imageUris.isNotEmpty()) {
+                        resultChannel.success(
+                            mapOf(
+                                "Uris" to imageUris,
+                                "Count" to imageUris.size
+                            )
+                        )
+                    } else {
+                        resultChannel.error("SCAN_FAILED", "Nenhum caminho de imagem foi retornado", null)
+                    }
+                } ?: resultChannel.error("SCAN_FAILED", "Nenhum resultado de imagem retornado", null)
+            } else {
+                resultChannel.success(null)
+            }
+        }
+    }
+
+    pendingResults.remove(requestCode) // Limpa o resultado pendente após ser usado
+    return true
+}
+
 
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         channel = MethodChannel(binding.binaryMessenger, "flutter_doc_scanner")
