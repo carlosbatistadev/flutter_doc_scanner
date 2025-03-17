@@ -3,11 +3,12 @@ package com.shirsh.flutter_doc_scanner
 import android.app.Activity
 import android.app.Application
 import android.content.Intent
-import android.content.IntentSender
+import android.os.Bundle
 import android.util.Log
+import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.IntentSenderRequest
-import androidx.core.app.ActivityCompat.startIntentSenderForResult
-import com.google.android.gms.tasks.Task
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.annotation.NonNull
 import com.google.mlkit.vision.documentscanner.GmsDocumentScannerOptions
 import com.google.mlkit.vision.documentscanner.GmsDocumentScanning
 import com.google.mlkit.vision.documentscanner.GmsDocumentScanningResult
@@ -16,153 +17,125 @@ import io.flutter.embedding.engine.plugins.activity.ActivityAware
 import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
-import io.flutter.plugin.common.PluginRegistry.ActivityResultListener
+import io.flutter.plugin.common.MethodChannel.MethodCallHandler
 
-class FlutterDocScannerPlugin : MethodChannel.MethodCallHandler, ActivityResultListener,
-    FlutterPlugin, ActivityAware {
-
+class FlutterDocScannerPlugin : FlutterPlugin, ActivityAware, MethodCallHandler {
     private var channel: MethodChannel? = null
-    private var pluginBinding: FlutterPlugin.FlutterPluginBinding? = null
-    private var activityBinding: ActivityPluginBinding? = null
     private var activity: Activity? = null
-    private val CHANNEL = "flutter_doc_scanner"
+    private var scannerLauncher: ActivityResultLauncher<IntentSenderRequest>? = null
     private val TAG = "FlutterDocScannerPlugin"
 
-    // Códigos de requisição para diferentes tipos de digitalização
-    private val REQUEST_CODE_SCAN = 213312
-    private val REQUEST_CODE_SCAN_IMAGES = 215512
-    private val REQUEST_CODE_SCAN_PDF = 216612
-    private val REQUEST_CODE_SCAN_URI = 214412
-
-    // Mapeia requestCodes para os `Result` do Flutter
-    private val pendingResults = mutableMapOf<Int, MethodChannel.Result>()
-
-    override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
-        val arguments = call.arguments as? Map<*, *>
-        val pageLimit = (arguments?.get("page") as? Int)?.coerceAtLeast(1) ?: 4
-
-        when (call.method) {
-            "getScanDocuments" -> startDocumentScan(pageLimit, result, REQUEST_CODE_SCAN)
-            "getScannedDocumentAsImages" -> startDocumentScan(pageLimit, result, REQUEST_CODE_SCAN_IMAGES)
-            "getScannedDocumentAsPdf" -> startDocumentScan(pageLimit, result, REQUEST_CODE_SCAN_PDF)
-            "getScanDocumentsUri" -> startDocumentScan(pageLimit, result, REQUEST_CODE_SCAN_URI)
-            else -> result.notImplemented()
-        }
+    override fun onAttachedToEngine(@NonNull flutterPluginBinding: FlutterPlugin.FlutterPluginBinding) {
+        channel = MethodChannel(flutterPluginBinding.binaryMessenger, "flutter_doc_scanner")
+        channel?.setMethodCallHandler(this)
     }
 
-    private fun startDocumentScan(page: Int, result: MethodChannel.Result, requestCode: Int) {
-        if (activity == null) {
-            result.error("ACTIVITY_NOT_AVAILABLE", "Activity is null, cannot start scanner.", null)
-            return
-        }
-
-        val options = GmsDocumentScannerOptions.Builder()
-            .setGalleryImportAllowed(true)
-            .setPageLimit(page)
-            .setResultFormats(GmsDocumentScannerOptions.RESULT_FORMAT_JPEG, GmsDocumentScannerOptions.RESULT_FORMAT_PDF)
-            .setScannerMode(GmsDocumentScannerOptions.SCANNER_MODE_FULL)
-            .build()
-
-        val scanner = GmsDocumentScanning.getClient(options)
-        val task: Task<IntentSender> = scanner.getStartScanIntent(activity!!)
-
-        task.addOnSuccessListener { intentSender ->
-            try {
-                pendingResults[requestCode] = result // Armazena o result antes de iniciar o scanner
-                val intent = IntentSenderRequest.Builder(intentSender).build().intentSender
-                startIntentSenderForResult(activity!!, intent, requestCode, null, 0, 0, 0, null)
-            } catch (e: Exception) {
-                result.error("SCAN_FAILED", "Erro ao iniciar scanner: ${e.message}", null)
-                pendingResults.remove(requestCode)
-            }
-        }.addOnFailureListener { e ->
-            result.error("SCAN_FAILED", "Falha ao iniciar scanner: ${e.message}", null)
-        }
-    }
-
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?): Boolean {
-        val resultChannel = pendingResults[requestCode]
-        if (resultChannel == null) {
-            Log.e(TAG, "Erro: Nenhum resultChannel encontrado para requestCode: $requestCode")
-            return false
-        }
-
-        when (requestCode) {
-            REQUEST_CODE_SCAN, REQUEST_CODE_SCAN_PDF -> {
-                if (resultCode == Activity.RESULT_OK) {
-                    val scanningResult = GmsDocumentScanningResult.fromActivityResultIntent(data)
-                    scanningResult?.pdf?.let { pdf ->
-                        val pdfUri = pdf.uri
-                        val pageCount = pdf.pageCount
-                        if (pdfUri != null) {
-                            resultChannel.success(
-                                mapOf(
-                                    "pdfUri" to pdfUri.toString(),
-                                    "pageCount" to pageCount
-                                )
-                            )
-                        } else {
-                            resultChannel.error("SCAN_FAILED", "PDF URI não retornado pelo scanner", null)
-                        }
-                    } ?: resultChannel.error("SCAN_FAILED", "Nenhum resultado de PDF retornado", null)
-                } else {
-                    resultChannel.success(null)
-                }
-            }
-
-            REQUEST_CODE_SCAN_IMAGES, REQUEST_CODE_SCAN_URI -> {
-                if (resultCode == Activity.RESULT_OK) {
-                    val scanningResult = GmsDocumentScanningResult.fromActivityResultIntent(data)
-                    scanningResult?.pages?.let { pages ->
-                        val imageUris = pages.mapNotNull { it.uri?.toString() }
-                        if (imageUris.isNotEmpty()) {
-                            resultChannel.success(
-                                mapOf(
-                                    "Uris" to imageUris,
-                                    "Count" to imageUris.size
-                                )
-                            )
-                        } else {
-                            resultChannel.error("SCAN_FAILED", "Nenhum caminho de imagem foi retornado", null)
-                        }
-                    } ?: resultChannel.error("SCAN_FAILED", "Nenhum resultado de imagem retornado", null)
-                } else {
-                    resultChannel.success(null)
-                }
-            }
-        }
-
-        pendingResults.remove(requestCode) // Limpa o resultado após a entrega
-        return true
-    }
-
-    override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
-        pluginBinding = binding
-    }
-
-    override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
-        pluginBinding = null
+    override fun onDetachedFromEngine(@NonNull binding: FlutterPlugin.FlutterPluginBinding) {
+        channel?.setMethodCallHandler(null)
+        channel = null
     }
 
     override fun onAttachedToActivity(binding: ActivityPluginBinding) {
-        activityBinding = binding
         activity = binding.activity
-        activityBinding?.addActivityResultListener(this)
-        channel = MethodChannel(pluginBinding!!.binaryMessenger, CHANNEL)
-        channel!!.setMethodCallHandler(this)
+        setupActivityResultLauncher()
     }
 
     override fun onDetachedFromActivity() {
-        activityBinding?.removeActivityResultListener(this)
-        activityBinding = null
         activity = null
+        scannerLauncher = null
+    }
+
+    override fun onReattachedToActivityForConfigChanges(binding: ActivityPluginBinding) {
+        onAttachedToActivity(binding)
     }
 
     override fun onDetachedFromActivityForConfigChanges() {
         onDetachedFromActivity()
     }
 
-    override fun onReattachedToActivityForConfigChanges(binding: ActivityPluginBinding) {
-        onAttachedToActivity(binding)
+    private fun setupActivityResultLauncher() {
+        activity?.let { activity ->
+            scannerLauncher = activity.registerForActivityResult(
+                ActivityResultContracts.StartIntentSenderForResult()
+            ) { result ->
+                if (result.resultCode == Activity.RESULT_OK) {
+                    val scanningResult = GmsDocumentScanningResult.fromIntent(result.data)
+                    scanningResult?.let { processScanningResult(it) }
+                } else {
+                    Log.e(TAG, "Scanning canceled or failed with resultCode: ${result.resultCode}")
+                }
+            }
+        }
+    }
+
+    override fun onMethodCall(@NonNull call: MethodCall, @NonNull result: MethodChannel.Result) {
+        when (call.method) {
+            "getPlatformVersion" -> {
+                result.success("Android ${android.os.Build.VERSION.RELEASE}")
+            }
+            "getScanDocuments" -> {
+                val pageLimit = (call.argument<Int>("page") ?: 4).coerceAtLeast(1)
+                startDocumentScan(pageLimit, result)
+            }
+            else -> {
+                result.notImplemented()
+            }
+        }
+    }
+
+    private fun startDocumentScan(pageLimit: Int, result: MethodChannel.Result) {
+        activity?.let { activity ->
+            val options = GmsDocumentScannerOptions.Builder()
+                .setGalleryImportAllowed(true)
+                .setPageLimit(pageLimit)
+                .setResultFormats(
+                    GmsDocumentScannerOptions.RESULT_FORMAT_JPEG,
+                    GmsDocumentScannerOptions.RESULT_FORMAT_PDF
+                )
+                .setScannerMode(GmsDocumentScannerOptions.SCANNER_MODE_FULL)
+                .build()
+
+            val scanner = GmsDocumentScanning.getClient(activity, options)
+            scanner.getStartScanIntent()
+                .addOnSuccessListener { intentSender ->
+                    try {
+                        val intentSenderRequest = IntentSenderRequest.Builder(intentSender).build()
+                        scannerLauncher?.launch(intentSenderRequest)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Failed to start document scan", e)
+                        result.error("SCAN_FAILED", "Failed to start document scan", e.localizedMessage)
+                    }
+                }
+                .addOnFailureListener { e ->
+                    Log.e(TAG, "Failed to get scan intent", e)
+                    result.error("SCAN_FAILED", "Failed to get scan intent", e.localizedMessage)
+                }
+        } ?: run {
+            result.error("ACTIVITY_NOT_AVAILABLE", "Activity is not available", null)
+        }
+    }
+
+    private fun processScanningResult(scanningResult: GmsDocumentScanningResult) {
+        val pages = scanningResult.pages
+        val pdf = scanningResult.pdf
+
+        val pageUris = pages.mapNotNull { it.imageUri?.toString() }
+        val pdfUri = pdf?.uri?.toString()
+        val pageCount = pdf?.pageCount ?: 0
+
+        val resultData = mutableMapOf<String, Any>()
+        if (pageUris.isNotEmpty()) {
+            resultData["imageUris"] = pageUris
+        }
+        pdfUri?.let {
+            resultData["pdfUri"] = it
+            resultData["pageCount"] = pageCount
+        }
+
+        if (resultData.isNotEmpty()) {
+            channel?.invokeMethod("onDocumentScanned", resultData)
+        } else {
+            Log.e(TAG, "No valid scanning results found")
+        }
     }
 }
