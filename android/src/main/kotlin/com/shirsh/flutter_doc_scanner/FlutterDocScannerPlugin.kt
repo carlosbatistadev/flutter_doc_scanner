@@ -148,7 +148,7 @@ class FlutterDocScannerPlugin : FlutterPlugin, ActivityAware, MethodChannel.Meth
                     GmsDocumentScannerOptions.RESULT_FORMAT_JPEG,
                     GmsDocumentScannerOptions.RESULT_FORMAT_PDF
                 )
-                .setScannerMode(GmsDocumentScannerOptions.CAPTURE_MODE_MANUAL)
+                .setScannerMode(GmsDocumentScannerOptions.SCANNER_MODE_BASE)
                 .build()
 
             val scanner = GmsDocumentScanning.getClient(options)
