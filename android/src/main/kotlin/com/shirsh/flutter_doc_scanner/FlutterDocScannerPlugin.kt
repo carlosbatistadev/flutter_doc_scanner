@@ -5,8 +5,11 @@ import android.content.Intent
 import android.content.IntentSender
 import android.os.Bundle
 import android.util.Log
+import androidx.activity.ComponentActivity
+import androidx.activity.result.ActivityResult
+import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.IntentSenderRequest
-import androidx.core.app.ActivityCompat.startIntentSenderForResult
+import androidx.activity.result.contract.ActivityResultContracts
 import com.google.android.gms.tasks.Task
 import com.google.mlkit.vision.documentscanner.GmsDocumentScannerOptions
 import com.google.mlkit.vision.documentscanner.GmsDocumentScanning
@@ -16,13 +19,8 @@ import io.flutter.embedding.engine.plugins.activity.ActivityAware
 import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
-import io.flutter.plugin.common.PluginRegistry.ActivityResultListener
 
-class FlutterDocScannerPlugin : 
-    FlutterPlugin, 
-    ActivityAware, 
-    MethodChannel.MethodCallHandler, 
-    ActivityResultListener {
+class FlutterDocScannerPlugin : FlutterPlugin, ActivityAware, MethodChannel.MethodCallHandler {
 
     private var channel: MethodChannel? = null
     private var activity: Activity? = null
@@ -30,10 +28,14 @@ class FlutterDocScannerPlugin :
 
     private val TAG = "FlutterDocScannerPlugin"
 
-    // Armazena resultados pendentes. A chave é o requestCode e o valor é o callback do Flutter.
-    private val pendingResults = mutableMapOf<Int, MethodChannel.Result>()
+    // Variáveis para armazenar o callback pendente e o tipo de operação (equivalente ao requestCode)
+    private var pendingScanType: Int? = null
+    private var pendingMethodResult: MethodChannel.Result? = null
 
-    // Códigos de requisição
+    // Launcher para iniciar o IntentSender com a nova API de Activity Result
+    private var scanLauncher: ActivityResultLauncher<IntentSenderRequest>? = null
+
+    // Tipos de operação (antigos requestCodes)
     private val REQUEST_CODE_SCAN = 213312
     private val REQUEST_CODE_SCAN_URI = 214412
     private val REQUEST_CODE_SCAN_IMAGES = 215512
@@ -55,48 +57,54 @@ class FlutterDocScannerPlugin :
     override fun onAttachedToActivity(binding: ActivityPluginBinding) {
         activity = binding.activity
         activityBinding = binding
-        activityBinding?.addActivityResultListener(this)
+
+        // Registra o callback incondicionalmente usando registerForActivityResult
+        if (activity is ComponentActivity) {
+            scanLauncher = (activity as ComponentActivity).registerForActivityResult(
+                ActivityResultContracts.StartIntentSenderForResult()
+            ) { result: ActivityResult ->
+                handleScanResult(result)
+            }
+        } else {
+            Log.e(TAG, "Activity não é ComponentActivity. Considere usar a API legacy.")
+        }
     }
 
     /**
-     * Chamado quando há mudança de configuração (ex.: rotação).
-     * Não limpamos o pendingResults aqui para que, se o scanner já estiver em execução,
-     * ainda possamos receber o resultado futuramente.
+     * Chamado em mudança de configuração (ex.: rotação).
+     * Não limpamos os pendentes para que possamos restaurar a operação em andamento.
      */
     override fun onDetachedFromActivityForConfigChanges() {
-        activityBinding?.removeActivityResultListener(this)
         activityBinding = null
         activity = null
     }
 
     /**
-     * Chamado após a Activity ser recriada por mudança de configuração.
-     * Reanexamos o listener para continuar recebendo o resultado pendente.
+     * Após a Activity ser recriada, reanexamos o launcher para continuar recebendo o resultado.
      */
     override fun onReattachedToActivityForConfigChanges(binding: ActivityPluginBinding) {
         activity = binding.activity
         activityBinding = binding
-        activityBinding?.addActivityResultListener(this)
+        if (activity is ComponentActivity) {
+            scanLauncher = (activity as ComponentActivity).registerForActivityResult(
+                ActivityResultContracts.StartIntentSenderForResult()
+            ) { result: ActivityResult ->
+                handleScanResult(result)
+            }
+        }
     }
 
     /**
-     * Chamado quando a Activity é definitivamente removida (ex.: FlutterEngine destruído, navegação etc.)
-     * Neste caso, não há mais como retornar resultados pendentes.
-     * Se quisermos retornar erro ao Flutter, este é o momento.
+     * Quando a Activity é definitivamente removida, retornamos erro para o Flutter se houver operação pendente.
      */
     override fun onDetachedFromActivity() {
-        activityBinding?.removeActivityResultListener(this)
-
-        // Se ainda houver algo pendente, retornamos erro para o Flutter.
-        pendingResults.forEach { (_, resultChannel) ->
-            resultChannel.error(
-                "ACTIVITY_DETACHED",
-                "A Activity foi encerrada antes de concluir o processo de digitalização.",
-                null
-            )
-        }
-        pendingResults.clear()
-
+        pendingMethodResult?.error(
+            "ACTIVITY_DETACHED",
+            "A Activity foi encerrada antes de concluir o processo de digitalização.",
+            null
+        )
+        pendingMethodResult = null
+        pendingScanType = null
         activityBinding = null
         activity = null
     }
@@ -117,24 +125,18 @@ class FlutterDocScannerPlugin :
         }
     }
 
-    private fun startDocumentScan(pageLimit: Int, requestCode: Int, result: MethodChannel.Result) {
+    /**
+     * Inicia a digitalização do documento, armazenando o callback e o tipo pendente,
+     * e utilizando o ActivityResultLauncher para disparar a atividade de scanner.
+     */
+    private fun startDocumentScan(pageLimit: Int, scanType: Int, result: MethodChannel.Result) {
         if (activity == null) {
-            result.error(
-                "ACTIVITY_NOT_AVAILABLE", 
-                "Activity is null, cannot start scanner.", 
-                null
-            )
+            result.error("ACTIVITY_NOT_AVAILABLE", "Activity é nula, não é possível iniciar o scanner.", null)
             return
         }
 
-        // Se já existir um pending result com o mesmo requestCode, retornamos erro
-        // para evitar conflitos (ou você pode optar por outra lógica).
-        if (pendingResults.containsKey(requestCode)) {
-            result.error(
-                "SCAN_ALREADY_IN_PROGRESS",
-                "Já existe uma digitalização em andamento para este requestCode.",
-                null
-            )
+        if (pendingMethodResult != null) {
+            result.error("SCAN_ALREADY_IN_PROGRESS", "Já existe uma digitalização em andamento.", null)
             return
         }
 
@@ -152,121 +154,98 @@ class FlutterDocScannerPlugin :
             val scanner = GmsDocumentScanning.getClient(options)
             val task: Task<IntentSender> = scanner.getStartScanIntent(activity!!)
 
-            task
-                .addOnSuccessListener { intentSender ->
-                    pendingResults[requestCode] = result
-                    val intent = IntentSenderRequest.Builder(intentSender).build().intentSender
-                    startIntentSenderForResult(activity!!, intent, requestCode, null, 0, 0, 0, null)
+            task.addOnSuccessListener { intentSender ->
+                // Armazena as informações pendentes para uso na callback
+                pendingScanType = scanType
+                pendingMethodResult = result
+
+                val intentSenderRequest = IntentSenderRequest.Builder(intentSender).build()
+                scanLauncher?.launch(intentSenderRequest) ?: run {
+                    result.error("SCAN_FAILED", "ActivityResultLauncher não disponível", null)
                 }
-                .addOnFailureListener { e ->
-                    Log.e(TAG, "Falha ao obter Intent do scanner", e)
-                    result.error(
-                        "SCAN_FAILED",
-                        "Falha ao obter Intent do scanner: ${e.stackTraceToString()}",
-                        null
-                    )
-                }
+            }.addOnFailureListener { e ->
+                Log.e(TAG, "Falha ao obter Intent do scanner", e)
+                result.error("SCAN_FAILED", "Falha ao obter Intent do scanner: ${e.stackTraceToString()}", null)
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Erro ao iniciar scanner", e)
-            result.error(
-                "SCAN_FAILED",
-                "Erro ao iniciar scanner: ${e.stackTraceToString()}",
-                null
-            )
+            result.error("SCAN_FAILED", "Erro ao iniciar scanner: ${e.stackTraceToString()}", null)
         }
     }
 
-    // -------------------------
-    // ActivityResultListener
-    // -------------------------
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?): Boolean {
-        val resultChannel = pendingResults[requestCode]
-        if (resultChannel == null) {
-            // Não é para nós ou perdemos o pending result (improvável se o processo ainda é o mesmo)
-            Log.e(TAG, "Nenhum resultChannel encontrado para requestCode: $requestCode")
-            return false
+    /**
+     * Processa o resultado da digitalização, diferenciando entre PDF e imagens
+     * conforme o tipo de operação pendente.
+     */
+    private fun handleScanResult(result: ActivityResult) {
+        val currentResult = pendingMethodResult
+        val scanType = pendingScanType
+
+        // Limpa os pendentes, para evitar reenvio
+        pendingMethodResult = null
+        pendingScanType = null
+
+        if (currentResult == null) {
+            Log.e(TAG, "Nenhum callback pendente para processar o resultado.")
+            return
         }
 
         try {
-            when (requestCode) {
+            when (scanType) {
                 REQUEST_CODE_SCAN, REQUEST_CODE_SCAN_PDF -> {
-                    if (resultCode == Activity.RESULT_OK) {
-                        val scanningResult = GmsDocumentScanningResult.fromActivityResultIntent(data)
+                    if (result.resultCode == Activity.RESULT_OK) {
+                        val scanningResult = GmsDocumentScanningResult.fromActivityResultIntent(result.data)
                         val pdf = scanningResult?.pdf
                         if (pdf != null) {
                             val pdfUri = pdf.uri
                             val pageCount = pdf.pageCount
                             if (pdfUri != null) {
-                                resultChannel.success(
+                                currentResult.success(
                                     mapOf(
                                         "pdfUri" to pdfUri.toString(),
                                         "pageCount" to pageCount
                                     )
                                 )
                             } else {
-                                resultChannel.error(
-                                    "SCAN_FAILED",
-                                    "PDF URI não retornado pelo scanner",
-                                    null
-                                )
+                                currentResult.error("SCAN_FAILED", "PDF URI não retornado pelo scanner", null)
                             }
                         } else {
-                            resultChannel.error(
-                                "SCAN_FAILED",
-                                "Nenhum resultado de PDF retornado",
-                                null
-                            )
+                            currentResult.error("SCAN_FAILED", "Nenhum resultado de PDF retornado", null)
                         }
                     } else {
-                        // Se usuário cancelou ou algo assim, retornamos null para indicar sem resultado.
-                        resultChannel.success(null)
+                        currentResult.success(null)
                     }
                 }
-
                 REQUEST_CODE_SCAN_IMAGES, REQUEST_CODE_SCAN_URI -> {
-                    if (resultCode == Activity.RESULT_OK) {
-                        val scanningResult = GmsDocumentScanningResult.fromActivityResultIntent(data)
+                    if (result.resultCode == Activity.RESULT_OK) {
+                        val scanningResult = GmsDocumentScanningResult.fromActivityResultIntent(result.data)
                         val pages = scanningResult?.pages
                         if (pages != null && pages.isNotEmpty()) {
-                            // Mapeia cada página para sua imageUri
                             val imageUris = pages.mapNotNull { it.imageUri?.toString() }
                             if (imageUris.isNotEmpty()) {
-                                resultChannel.success(
+                                currentResult.success(
                                     mapOf(
                                         "Uris" to imageUris,
                                         "Count" to imageUris.size
                                     )
                                 )
                             } else {
-                                resultChannel.error(
-                                    "SCAN_FAILED",
-                                    "Nenhum caminho de imagem foi retornado",
-                                    null
-                                )
+                                currentResult.error("SCAN_FAILED", "Nenhum caminho de imagem foi retornado", null)
                             }
                         } else {
-                            resultChannel.error(
-                                "SCAN_FAILED",
-                                "Nenhum resultado de imagem retornado",
-                                null
-                            )
+                            currentResult.error("SCAN_FAILED", "Nenhum resultado de imagem retornado", null)
                         }
                     } else {
-                        resultChannel.success(null)
+                        currentResult.success(null)
                     }
+                }
+                else -> {
+                    currentResult.error("SCAN_FAILED", "Tipo de operação desconhecido", null)
                 }
             }
         } catch (e: Exception) {
             Log.e(TAG, "Erro ao processar resultado do scanner", e)
-            // Se algo der errado aqui, retornamos um erro detalhado.
-            resultChannel.error(
-                "SCAN_PROCESSING_ERROR",
-                "Erro ao processar resultado do scanner: ${e.stackTraceToString()}",
-                null
-            )
-        } finally {
-            pendingResults.remove(requestCode) // Limpa o result pendente
+            currentResult.error("SCAN_PROCESSING_ERROR", "Erro ao processar resultado do scanner: ${e.stackTraceToString()}", null)
         }
-        return true
     }
 }
